@@ -411,6 +411,37 @@ def health_summary():
         "ts": now(),
     }
 
+@app.get("/v1/_dashboard")
+def dashboard_api():
+    """Full dashboard data as JSON: groups, routes, health, request log, config."""
+    with lock:
+        snap = {k: dict(v) for k, v in status.items()}
+    routes_view = []
+    for gname, routes in groups.items():
+        for rt in routes:
+            s = snap.get(rt, {})
+            routes_view.append({
+                "route": rt, "group": gname,
+                "healthy": s.get("healthy", False),
+                "cooldown": s.get("cooldown_until", 0) > now(),
+                "manual": s.get("manual", False),
+                "disabled": rt in disabled_routes,
+                "result": s.get("last_result", ""),
+                "last_check": s.get("last_check", 0),
+                "failures": s.get("failures", 0),
+                "max_input_tokens": s.get("max_input_tokens"),
+            })
+    with _request_log_lock:
+        req_log = list(_request_log)[-50:]
+    return {
+        "groups": {g: list(rs) for g, rs in groups.items()},
+        "routes": routes_view,
+        "providers": {k: {"baseUrl": v.get("baseUrl", ""), "cooldown_minutes": v.get("cooldown_minutes", 10)} for k, v in providers.items()},
+        "disabled_routes": sorted(disabled_routes),
+        "request_log": req_log,
+        "ts": now(),
+    }
+
 @app.get("/v1/_status")
 def get_status():
     with lock:

@@ -62,6 +62,7 @@
     <a href="/requests">Requests</a>
     <a href="/logs">Logs</a>
   </nav>
+  <div id="health-badge" class="state ok" style="font-size:11px;margin-left:8px;">●</div>
   <div class="counts">
     <span class="pill">OK <b id="c-ok">0</b></span>
     <span class="pill">COOL <b id="c-cool">0</b></span>
@@ -91,6 +92,15 @@ async function refresh() {
     document.getElementById('c-manual').textContent = c.manual;
     document.getElementById('c-fail').textContent = c.fail;
     document.getElementById('c-disabled').textContent = {{ disabled|length }};
+    // health badge
+    const badge = document.getElementById('health-badge');
+    if (badge) {
+      const total = c.ok + c.cool + c.manual + c.fail + c.disabled;
+      if (total === 0 || c.ok === total) { badge.textContent = '● healthy'; badge.className = 'state ok'; }
+      else if (c.ok > 0 && c.fail === 0) { badge.textContent = '● healthy'; badge.className = 'state ok'; }
+      else if (c.ok > 0) { badge.textContent = '● degraded'; badge.className = 'state cool'; }
+      else { badge.textContent = '● down'; badge.className = 'state fail'; }
+    }
   } catch(e) {}
 }
 refreshTimer = setInterval(refresh, 2000);
