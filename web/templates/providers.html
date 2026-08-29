@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}free-router · providers{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Add provider</h2>
+  <form method="post" action="/providers/add">
+    <div class="grid">
+      <div><label>Name (used as prefix, e.g. bai)</label>
+        <input name="name" required placeholder="myfree"></div>
+      <div><label>Base URL (OpenAI-compatible)</label>
+        <input name="baseUrl" required placeholder="https://api.example.com/v1"></div>
+    </div>
+    <label>API key</label>
+    <input name="apiKey" placeholder="sk-...">
+    <label>Cooldown minutes (after a fail)</label>
+    <input name="cooldown_minutes" type="number" value="10">
+    <div class="row" style="margin-top:12px;">
+      <button>Add provider</button>
+      <span class="muted">Then add its models as routes under a group (below), then /reload.</span>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Providers</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Base URL</th><th>Key (last 4)</th><th>Cooldown</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for name, p in providers.items() %}
+      <tr>
+        <td class="route">{{ name }}</td>
+        <td class="muted">{{ p.baseUrl }}</td>
+        <td class="muted">{{ (p.apiKey[-4:] if p.apiKey else '—') }}</td>
+        <td class="muted">{{ p.cooldown_minutes }}m</td>
+        <td class="row">
+          <form class="inline" action="/providers/delete/{{ name }}" method="post"
+                onsubmit="return confirm('Delete provider {{ name }}?');">
+            <button class="danger">delete</button></form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Groups &amp; routes</h2>
+  {% for g, rs in groups.items() %}
+  <form method="post" action="/groups/edit" style="margin-bottom:14px;">
+    <div class="row"><b>{{ g }}</b></div>
+    <input type="hidden" name="group" value="{{ g }}">
+    <textarea name="routes" rows="3">{{ rs|join('\n') }}</textarea>
+    <div class="row" style="margin-top:6px;">
+      <button class="alt">Save group</button></div>
+  </form>
+  {% endfor %}
+  <p class="muted">One route per line, format <code>provider/model</code>. Disabled routes:
+     {{ disabled|join(', ') if disabled else 'none' }}.</p>
+</div>
+
+<div class="card">
+  <h2>Route overrides (input caps)</h2>
+  <table>
+    <thead><tr><th>Route</th><th>max_input_tokens</th></tr></thead>
+    <tbody>
+    {% for rt, ov in overrides.items() %}
+      <tr><td class="route">{{ rt }}</td><td class="muted">{{ ov.max_input_tokens }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">Edit these in providers.yml under `route_overrides` directly, then /reload.</p>
+</div>
+
+<div class="card">
+  <form class="inline" action="/reload" method="post"><button>Reload providers.yml</button></form>
+  <a class="btn alt" href="/logs">View logs</a>
+</div>
+{% endblock %}

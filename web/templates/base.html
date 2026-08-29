@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}free-router{% endblock %}</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
+          --muted:#8b949e; --ok:#3fb950; --cool:#d29922; --manual:#f85149;
+          --fail:#f85149; --disabled:#6e7681; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+         background:var(--bg); color:var(--fg); }
+  a { color:var(--accent); text-decoration:none; }
+  header { display:flex; align-items:center; gap:18px; padding:14px 20px;
+           background:var(--panel); border-bottom:1px solid var(--border); }
+  header h1 { font-size:16px; margin:0; }
+  header nav a { margin-right:14px; color:var(--muted); }
+  header nav a:hover { color:var(--fg); }
+  main { padding:20px; }
+  .counts { display:flex; gap:10px; margin-left:auto; flex-wrap:wrap; }
+  .pill { padding:3px 10px; border:1px solid var(--border); border-radius:20px;
+          font-size:12px; color:var(--muted); }
+  .pill b { color:var(--fg); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+          padding:16px; margin-bottom:16px; }
+  h2 { font-size:14px; margin:0 0 12px; color:var(--muted); text-transform:uppercase;
+       letter-spacing:.5px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border);
+           vertical-align:middle; }
+  th { color:var(--muted); font-weight:400; font-size:12px; }
+  .state { display:inline-block; padding:2px 9px; border-radius:12px; font-size:11px;
+           font-weight:600; }
+  .state.ok { background:rgba(63,185,80,.15); color:var(--ok); }
+  .state.cool { background:rgba(210,153,34,.15); color:var(--cool); }
+  .state.manual { background:rgba(248,81,73,.15); color:var(--manual); }
+  .state.fail { background:rgba(248,81,73,.15); color:var(--fail); }
+  .state.disabled { background:rgba(110,118,129,.2); color:var(--disabled); }
+  .route { font-weight:600; }
+  button, .btn { background:var(--accent); color:#0d1117; border:0; border-radius:6px;
+                 padding:5px 11px; cursor:pointer; font:inherit; font-weight:600; }
+  button.alt { background:transparent; color:var(--muted); border:1px solid var(--border); }
+  button.danger { background:transparent; color:var(--manual); border:1px solid var(--manual); }
+  form.inline { display:inline; }
+  input, textarea, select { background:#0d1117; color:var(--fg); border:1px solid var(--border);
+                            border-radius:6px; padding:7px 9px; font:inherit; width:100%; }
+  label { display:block; color:var(--muted); margin:10px 0 4px; font-size:12px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  pre { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:12px;
+        overflow:auto; max-height:320px; white-space:pre-wrap; color:var(--muted); }
+  .muted { color:var(--muted); font-size:12px; }
+  .row { display:flex; gap:10px; align-items:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>free-router</h1>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/providers">Providers</a>
+    <a href="/logs">Logs</a>
+  </nav>
+  <div class="counts">
+    <span class="pill">OK <b id="c-ok">0</b></span>
+    <span class="pill">COOL <b id="c-cool">0</b></span>
+    <span class="pill">MANUAL <b id="c-manual">0</b></span>
+    <span class="pill">FAIL <b id="c-fail">0</b></span>
+    <span class="pill">DISABLED <b id="c-disabled">0</b></span>
+  </div>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<script>
+// 2s auto-refresh of the dashboard counts (pause on hover)
+let refreshTimer = null, paused = false;
+document.addEventListener('mouseover', e => { if (e.target.closest('main')) paused = true; });
+document.addEventListener('mouseout', e => { if (e.target.closest('main')) paused = false; });
+async function refresh() {
+  if (paused || !document.getElementById('c-ok')) return;
+  try {
+    const r = await fetch('/v1/_status'); const s = await r.json();
+    let c = {ok:0,cool:0,manual:0,fail:0,disabled:0};
+    for (const k in s) { const st = s[k];
+      if (st.manual) c.manual++; else if (st.cooldown_until && st.cooldown_until*1000 > Date.now()) c.cool++;
+      else if (!st.healthy) c.fail++; else c.ok++; }
+    document.getElementById('c-ok').textContent = c.ok;
+    document.getElementById('c-cool').textContent = c.cool;
+    document.getElementById('c-manual').textContent = c.manual;
+    document.getElementById('c-fail').textContent = c.fail;
+    document.getElementById('c-disabled').textContent = {{ disabled|length }};
+  } catch(e) {}
+}
+refreshTimer = setInterval(refresh, 2000);
+</script>
+</body>
+</html>

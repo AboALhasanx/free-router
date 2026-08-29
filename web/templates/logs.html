@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}free-router · logs{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>health.log (daily sweeps)</h2>
+  <pre>{{ health if health else '(empty)' }}</pre>
+</div>
+<div class="card">
+  <h2>router.log (watchdog)</h2>
+  <pre>{{ router if router else '(empty)' }}</pre>
+</div>
+<div class="card">
+  <h2>stdout.log (uvicorn)</h2>
+  <pre>{{ stdout if stdout else '(empty)' }}</pre>
+</div>
+<div class="card">
+  <h2>stderr.log</h2>
+  <pre>{{ stderr if stderr else '(empty)' }}</pre>
+</div>
+<p class="muted">Logs are local-only. Reload this page to refresh (no auto-refresh here).</p>
+{% endblock %}

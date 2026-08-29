@@ -1,0 +1,58 @@
+# Free Model API Gateway — provider + group definitions
+# Only the assistant edits this file. Clients (OpenCode, omp) never see raw
+# provider/model ids; they only see the group names under "groups".
+#
+# To add a new free provider from a tweet you paste:
+#   1. add a `providers:` entry (baseUrl + apiKey)
+#   2. add its model ids as routes under the right group(s)
+#   3. run:  curl -X POST http://127.0.0.1:8765/v1/_test_all
+#   4. check: curl http://127.0.0.1:8765/v1/_status
+# No OpenCode or omp config changes needed.
+
+groups:
+  free-fast:
+    - bai/hy3
+    - bai/deepseek-v4-flash
+    - bai/mimo-v2.5
+    - bai/qwen3.8-flash
+    - inferx/Qwen3.8-27B-FP8
+    - inferx/Qwen3.6-35B-A3B-FP8
+  free-reasoning:
+    - bai/glm-5.3-flash
+    - inferx/glm-5.3-flash
+  free-coder:
+    - inferx/Qwen3-Coder-Next-FP8
+    - inferx/Devstral-2-123B-Instruct-2512-int4-AutoRound
+  free-vision:
+    - bai/deepseek-v4-flash-vision-exp
+  free-default:
+    - inferx/glm-5.3-flash
+    - bai/glm-5.3-flash
+
+providers:
+  bai:
+    baseUrl: https://api.b.ai/v1
+    apiKey: sk-2k2juiulmtadis221p6uxfgj3xpl3t85
+    cooldown_minutes: 10
+  inferx:
+    baseUrl: https://model.inferx.net/endpoints/v1
+    apiKey: ix_dcfba75ce34f426fefb7350bad7c432259c290720deb570a5dac21bee2a0f03a
+    cooldown_minutes: 10
+  # gmicloud deferred — base URL not yet confirmed on this host.
+  # Stays available directly via OpenCode's gmicloud provider and omp's gmi-cloud.
+  # When the base is known, add:
+  #   gmicloud:
+  #     baseUrl: <base>
+  #     apiKey: <jwt>
+  #     cooldown_minutes: 10
+  # and append "gmicloud/MiniMaxAI/MiniMax-M3" to free-default / free-fast.
+
+# Per-route input caps so the B.AI "Input token exceed after ~4 turns" never
+# reaches the upstream. Router transparently fails over to a larger-cap route.
+route_overrides:
+  bai/glm-5.3-flash:             { max_input_tokens: 32000 }
+  bai/hy3:                       { max_input_tokens: 32000 }
+  bai/deepseek-v4-flash:         { max_input_tokens: 32000 }
+  bai/mimo-v2.5:                 { max_input_tokens: 32000 }
+  bai/qwen3.8-flash:             { max_input_tokens: 32000 }
+  bai/deepseek-v4-flash-vision-exp: { max_input_tokens: 32000 }

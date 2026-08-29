@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}free-router · dashboard{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Model groups</h2>
+  <div class="row" style="flex-wrap:wrap;gap:8px;">
+    {% for g, rs in groups.items() %}
+      <span class="pill">{{ g }} <b>{{ rs|length }}</b></span>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Routes <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0;">— tests are non-blocking (15s cap, like free-llm-gateway). No more "keeps loading".</span></h2>
+  <div class="row" style="margin-bottom:12px; gap:8px;">
+    <button id="test-all" onclick="testAll()">Test all (parallel, ~15s)</button>
+    <span id="test-all-status" class="muted"></span>
+  </div>
+  <table>
+    <thead><tr><th>Route</th><th>Group</th><th>State</th><th>Detail</th><th>Last</th><th>Cap</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for rv in routes %}
+      <tr id="row-{{ rv.route|replace('/', '-')|replace('.', '-') }}">
+        <td class="route">{{ rv.route }}</td>
+        <td class="muted">{{ rv.group }}</td>
+        <td><span class="state {{ rv.state }}" id="state-{{ rv.route|replace('/', '-')|replace('.', '-') }}">{{ rv.state }}</span></td>
+        <td class="muted" id="detail-{{ rv.route|replace('/', '-')|replace('.', '-') }}">{{ rv.result }}</td>
+        <td class="muted">{% if rv.last_check %}{{ (now - rv.last_check)|abs }}s ago{% else %}—{% endif %}</td>
+        <td class="muted">{% if rv.cap %}{{ rv.cap }}{% else %}∞{% endif %}</td>
+        <td class="row">
+          <button onclick="testOne('{{ rv.route }}', this)">test</button>
+          <button class="alt" onclick="clearOne('{{ rv.route }}', this)">clear</button>
+          {% if rv.state == 'disabled' %}
+            <button class="alt" onclick="toggleOne('{{ rv.route }}', 'enable', this)">enable</button>
+          {% else %}
+            <button class="danger" onclick="toggleOne('{{ rv.route }}', 'disable', this)">disable</button>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">Inspired by <a href="https://github.com/MrFadiAi/free-llm-gateway" target="_blank">free-llm-gateway</a>: parallel batch (4 concurrent), 15s cap, /api/ping liveness.</p>
+</div>
+<script>
+// Non-blocking test — never hangs the page (AbortController + 18s browser cap)
+async function testOne(route, btn) {
+  const orig = btn.textContent; btn.textContent = '…'; btn.disabled = true;
+  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort('timeout 25s'), 25000);
+  try {
+    const r = await fetch('/route/' + encodeURIComponent(route) + '/test', {method:'POST', signal: ctrl.signal});
+    const j = await r.json();
+    const id = route.replace(/[\/\.]/g,'-');
+    const sEl = document.getElementById('state-'+id);
+    const dEl = document.getElementById('detail-'+id);
+    if (sEl) { sEl.textContent = j.ok ? 'ok' : 'fail'; sEl.className = 'state ' + (j.ok ? 'ok' : 'fail'); }
+    if (dEl) dEl.textContent = j.detail;
+  } catch(e) {
+    const id = route.replace(/[\/\.]/g,'-');
+    const dEl = document.getElementById('detail-'+id);
+    const msg = e.name==='AbortError' ? (e.message || 'timeout 25s') : e.message;
+    if (dEl) dEl.textContent = 'ERR ' + msg;
+  } finally { clearTimeout(t); btn.textContent = orig; btn.disabled = false; }
+}
+async function clearOne(route, btn) {
+  btn.disabled=true;
+  await fetch('/route/' + encodeURIComponent(route) + '/clear', {method:'POST'});
+  location.reload();
+}
+async function toggleOne(route, action, btn) {
+  btn.disabled=true;
+  await fetch('/route/' + encodeURIComponent(route) + '/' + action, {method:'POST'});
+  location.reload();
+}
+async function testAll() {
+  const s = document.getElementById('test-all-status');
+  const b = document.getElementById('test-all');
+  b.disabled=true; s.textContent='running 4 parallel… (20s cap, ~60s total)';
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort('timeout 150s'), 150000);
+  try {
+    const r = await fetch('/v1/_test_all', {method:'POST', signal: ctrl.signal});
+    clearTimeout(timer);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    let ok=0, fail=0; for(const k in j.results){ j.results[k].ok?ok++:fail++; }
+    s.textContent = `done: ${ok} ok, ${fail} fail — reloading…`;
+    setTimeout(()=>location.reload(), 900);
+  } catch(e) {
+    clearTimeout(timer);
+    const msg = e.name==='AbortError' ? (e.message || 'timeout 150s — providers may be slow, try single tests') : e.message;
+    s.textContent = 'ERR ' + msg; b.disabled=false;
+  }
+}
+</script>
+{% endblock %}

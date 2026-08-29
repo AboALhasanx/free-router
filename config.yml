@@ -1,0 +1,14 @@
+# free-router runtime config
+bind: 127.0.0.1      # switch to 0.0.0.0 to expose on LAN (later)
+port: 8765
+cooldown_minutes: 10
+# daily health sweeps: 3x at 5:00 / 5:20 / 5:40 local time
+schedule:
+  - "0 5 * * *"
+  - "20 5 * * *"
+  - "40 5 * * *"
+
+# Auth (set via environment variables, not here):
+#   FREE_ROUTER_API_KEY  - if set, /v1/* endpoints require Bearer token
+#   FREE_ROUTER_UI_USER  - if set (with UI_PASS), web UI requires basic auth
+#   FREE_ROUTER_UI_PASS  - password for web UI basic auth
