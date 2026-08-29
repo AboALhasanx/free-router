@@ -7,7 +7,7 @@
 #   POST /v1/_test/{route}     -> one-shot test of a single route
 #   POST /v1/_test_all         -> run the full daily sweep on demand
 # Deps: fastapi, uvicorn, httpx, pyyaml, apscheduler (all already on box)
-import json, os, time, yaml, threading, socket, secrets
+import json, os, time, yaml, threading, socket, secrets, collections
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException, Response
@@ -30,6 +30,40 @@ API_KEY = os.environ.get("FREE_ROUTER_API_KEY", "")  # if set, require Bearer to
 UI_USER = os.environ.get("FREE_ROUTER_UI_USER", "")  # if set, require basic auth on web UI
 UI_PASS = os.environ.get("FREE_ROUTER_UI_PASS", "")
 
+# --- Rate limiting (token bucket per client IP) ---
+RATE_LIMIT_RPM = int(os.environ.get("FREE_ROUTER_RPM", "30"))  # requests per minute
+_rate_buckets = {}  # ip -> (tokens, last_refill)
+_rate_lock = threading.Lock()
+
+def _rate_check(client_ip: str) -> bool:
+    """Return True if request is allowed, False if rate-limited."""
+    with _rate_lock:
+        now_ts = time.time()
+        tokens, last = _rate_buckets.get(client_ip, (RATE_LIMIT_RPM, now_ts))
+        # refill tokens based on elapsed time
+        elapsed = now_ts - last
+        tokens = min(RATE_LIMIT_RPM, tokens + elapsed * (RATE_LIMIT_RPM / 60.0))
+        if tokens < 1:
+            _rate_buckets[client_ip] = (tokens, now_ts)
+            return False
+        _rate_buckets[client_ip] = (tokens - 1, now_ts)
+        return True
+
+# --- Request logging ---
+_request_log = collections.deque(maxlen=200)  # last 200 requests
+_request_log_lock = threading.Lock()
+
+def _log_request(method: str, path: str, status: int, ms: float, client_ip: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"{ts} {method} {path} {status} {ms:.0f}ms {client_ip}"
+    with _request_log_lock:
+        _request_log.append(entry)
+    # also write to log/requests.log
+    try:
+        LOG_DIR.joinpath("requests.log").open("a").write(entry + "\n")
+    except Exception:
+        pass
+
 def check_api_auth(request: Request):
     """Validate Bearer token on /v1/* API routes. Skip /api/* and web UI."""
     if not API_KEY:
@@ -45,6 +79,8 @@ def check_api_auth(request: Request):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    start = time.time()
+    client_ip = request.client.host if request.client else "-"
     check_api_auth(request)
     # basic auth for web UI (skip API routes and ping)
     if UI_USER and UI_PASS and not request.url.path.startswith("/v1/") and not request.url.path.startswith("/api/"):
@@ -54,11 +90,22 @@ async def auth_middleware(request: Request, call_next):
                 decoded = base64.b64decode(auth[6:]).decode()
                 user, pwd = decoded.split(":", 1)
                 if secrets.compare_digest(user, UI_USER) and secrets.compare_digest(pwd, UI_PASS):
-                    return await call_next(request)
+                    resp = await call_next(request)
+                    _log_request(request.method, request.url.path, resp.status_code, (time.time() - start) * 1000, client_ip)
+                    return resp
             except Exception:
                 pass
+        _log_request(request.method, request.url.path, 401, (time.time() - start) * 1000, client_ip)
         return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="free-router"'})
-    return await call_next(request)
+    # rate limit /v1/chat/completions
+    if request.url.path == "/v1/chat/completions" and request.method == "POST":
+        if not _rate_check(client_ip):
+            _log_request(request.method, request.url.path, 429, (time.time() - start) * 1000, client_ip)
+            return Response(status_code=429, content=json.dumps({"error": "rate limit exceeded, try again later"}),
+                            media_type="application/json", headers={"Retry-After": "60"})
+    resp = await call_next(request)
+    _log_request(request.method, request.url.path, resp.status_code, (time.time() - start) * 1000, client_ip)
+    return resp
 
 lock = threading.Lock()
 reload_lock = threading.Lock()
@@ -311,6 +358,12 @@ async def chat_completions(req: Request):
 @app.get("/api/ping")
 def ping():
     return {"ok": True, "ts": now()}
+
+@app.get("/v1/_request_log")
+def get_request_log():
+    with _request_log_lock:
+        entries = list(_request_log)
+    return {"entries": entries[-50:], "total": len(entries)}
 
 @app.get("/v1/_status")
 def get_status():

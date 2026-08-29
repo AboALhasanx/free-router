@@ -12,3 +12,4 @@ schedule:
 #   FREE_ROUTER_API_KEY  - if set, /v1/* endpoints require Bearer token
 #   FREE_ROUTER_UI_USER  - if set (with UI_PASS), web UI requires basic auth
 #   FREE_ROUTER_UI_PASS  - password for web UI basic auth
+#   FREE_ROUTER_RPM      - rate limit per client IP (default: 30 req/min)

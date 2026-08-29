@@ -234,3 +234,64 @@ def test_cooldown_for_uses_provider_config():
     }
     assert r.cooldown_for("fast/model") == 5
     assert r.cooldown_for("slow/model") == 30
+
+
+# ── rate limiting ──
+
+def test_rate_check_allows_under_limit():
+    r._rate_buckets.clear()
+    for _ in range(5):
+        assert r._rate_check("1.2.3.4") is True
+
+
+def test_rate_check_blocks_over_limit():
+    r._rate_buckets.clear()
+    # consume all tokens
+    for _ in range(r.RATE_LIMIT_RPM):
+        r._rate_check("1.2.3.4")
+    # next request should be blocked
+    assert r._rate_check("1.2.3.4") is False
+
+
+def test_rate_check_separate_ips():
+    r._rate_buckets.clear()
+    # exhaust IP A
+    for _ in range(r.RATE_LIMIT_RPM):
+        r._rate_check("10.0.0.1")
+    assert r._rate_check("10.0.0.1") is False
+    # IP B should still be allowed
+    assert r._rate_check("10.0.0.2") is True
+
+
+def test_rate_check_refills_tokens():
+    r._rate_buckets.clear()
+    # exhaust tokens
+    for _ in range(r.RATE_LIMIT_RPM):
+        r._rate_check("1.2.3.4")
+    assert r._rate_check("1.2.3.4") is False
+    # simulate 60 seconds passing (full refill)
+    with r._rate_lock:
+        tokens, _ = r._rate_buckets["1.2.3.4"]
+        r._rate_buckets["1.2.3.4"] = (tokens, time.time() - 60)
+    assert r._rate_check("1.2.3.4") is True
+
+
+# ── request logging ──
+
+def test_log_request_stores_entries():
+    r._request_log.clear()
+    r._log_request("POST", "/v1/chat/completions", 200, 42.5, "127.0.0.1")
+    assert len(r._request_log) == 1
+    assert "POST" in r._request_log[0]
+    assert "200" in r._request_log[0]
+    assert "42ms" in r._request_log[0]
+
+
+def test_log_request_capped_at_200():
+    r._request_log.clear()
+    for i in range(250):
+        r._log_request("GET", f"/test/{i}", 200, 1.0, "127.0.0.1")
+    assert len(r._request_log) == 200
+    # oldest entries should be trimmed
+    assert "/test/49" not in r._request_log[0]
+    assert "/test/249" in r._request_log[-1]
