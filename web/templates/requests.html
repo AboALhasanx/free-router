@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}free-router · requests{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Request log <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0;">— last {{ total }} entries, newest first</span></h2>
+  <div class="row" style="margin-bottom:12px;">
+    <button onclick="location.reload()">Refresh</button>
+    <a href="/v1/_request_log" target="_blank" class="btn alt" style="text-decoration:none;">Raw JSON</a>
+  </div>
+  <table>
+    <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>Client</th></tr></thead>
+    <tbody>
+    {% for entry in entries %}
+      <tr>
+        {% set parts = entry.split(' ') %}
+        <td class="muted">{{ parts[0] }} {{ parts[1] }}</td>
+        <td><span class="state {% if parts[2] == 'POST' %}ok{% elif parts[2] == 'GET' %}cool{% else %}manual{% endif %}" style="font-size:11px;">{{ parts[2] }}</span></td>
+        <td class="route">{{ parts[3] }}</td>
+        <td><span class="state {% if parts[4]|int < 300 %}ok{% elif parts[4]|int < 500 %}cool{% else %}fail{% endif %}">{{ parts[4] }}</span></td>
+        <td class="muted">{{ parts[5] }}</td>
+        <td class="muted">{{ parts[6] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if not entries %}
+    <p class="muted">No requests logged yet. Make some API calls to see them here.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Health summary</h2>
+  <div id="health-summary" class="muted">Loading...</div>
+</div>
+
+<script>
+async function loadHealth() {
+  try {
+    const r = await fetch('/v1/_health');
+    const j = await r.json();
+    let html = '<table><thead><tr><th>Group</th><th>OK</th><th>Cool</th><th>Manual</th><th>Fail</th><th>Disabled</th><th>Health %</th></tr></thead><tbody>';
+    for (const [name, g] of Object.entries(j.groups)) {
+      html += `<tr><td class="route">${name}</td><td>${g.ok}</td><td>${g.cooldown}</td><td>${g.manual}</td><td>${g.fail}</td><td>${g.disabled}</td><td>${g.healthy_pct}%</td></tr>`;
+    }
+    html += `</tbody></table><p class="muted" style="margin-top:8px;">Overall: <span class="state ${j.status === 'healthy' ? 'ok' : j.status === 'degraded' ? 'cool' : 'fail'}">${j.status}</span> — ${j.healthy_routes}/${j.total_routes} routes healthy</p>`;
+    document.getElementById('health-summary').innerHTML = html;
+  } catch(e) { document.getElementById('health-summary').textContent = 'Failed to load'; }
+}
+loadHealth();
+</script>
+{% endblock %}

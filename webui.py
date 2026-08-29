@@ -186,3 +186,21 @@ def logs_page(request: Request):
         "stdout": tail("stdout.log"),
         "stderr": tail("stderr.log"),
     })
+
+@router.get("/requests", response_class=HTMLResponse)
+def requests_page(request: Request):
+    r = R()
+    with r._request_log_lock:
+        entries = list(r._request_log)[-100:]
+    entries.reverse()  # newest first
+    # load from log file if memory is empty
+    if not entries:
+        f = r.LOG_DIR / "requests.log"
+        if f.exists():
+            lines = f.read_text(errors="replace").splitlines()[-100:]
+            entries = list(reversed(lines))
+    return TEMPLATES.TemplateResponse(request, "requests.html", {
+        "request": request,
+        "entries": entries,
+        "total": len(entries),
+    })

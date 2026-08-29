@@ -11,6 +11,7 @@ import json, os, time, yaml, threading, socket, secrets, collections
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import base64
 import httpx
@@ -24,6 +25,15 @@ LOG_DIR = BASE / "log"
 LOG_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="free-router")
+
+# CORS: allow all origins by default (browser clients need this)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Auth config ---
 API_KEY = os.environ.get("FREE_ROUTER_API_KEY", "")  # if set, require Bearer token on /v1/*
@@ -364,6 +374,42 @@ def get_request_log():
     with _request_log_lock:
         entries = list(_request_log)
     return {"entries": entries[-50:], "total": len(entries)}
+
+@app.get("/v1/_health")
+def health_summary():
+    """Simplified health summary: per-group stats + overall status."""
+    with lock:
+        snap = {k: dict(v) for k, v in status.items()}
+    group_stats = {}
+    for gname, routes in groups.items():
+        ok = 0; cool = 0; manual = 0; fail = 0; disabled = 0
+        for rt in routes:
+            if rt in disabled_routes:
+                disabled += 1; continue
+            s = snap.get(rt, {})
+            if s.get("manual"):
+                manual += 1
+            elif s.get("cooldown_until", 0) > now():
+                cool += 1
+            elif not s.get("healthy"):
+                fail += 1
+            else:
+                ok += 1
+        total = len(routes)
+        group_stats[gname] = {
+            "total": total, "ok": ok, "cooldown": cool,
+            "manual": manual, "fail": fail, "disabled": disabled,
+            "healthy_pct": round(ok / total * 100) if total else 0,
+        }
+    total_routes = sum(g["total"] for g in group_stats.values())
+    total_ok = sum(g["ok"] for g in group_stats.values())
+    return {
+        "status": "healthy" if total_ok == total_routes else "degraded" if total_ok > 0 else "down",
+        "total_routes": total_routes,
+        "healthy_routes": total_ok,
+        "groups": group_stats,
+        "ts": now(),
+    }
 
 @app.get("/v1/_status")
 def get_status():
