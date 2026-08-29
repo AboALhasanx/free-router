@@ -295,3 +295,94 @@ def test_log_request_capped_at_200():
     # oldest entries should be trimmed
     assert "/test/49" not in r._request_log[0]
     assert "/test/249" in r._request_log[-1]
+
+
+# ── auto-disable ──
+
+def test_auto_disable_after_threshold():
+    r.disabled_routes.discard("test/route")
+    r._failure_history.pop("test/route", None)
+    r.status.pop("test/route", None)
+    # Simulate 5 failures within the window
+    for i in range(r.AUTO_DISABLE_THRESHOLD):
+        r.mark_fail("test/route", f"error {i}")
+    assert "test/route" in r.disabled_routes
+    s = r.status["test/route"]
+    assert s["manual"] is True
+    assert "auto-disabled" in s["last_result"]
+
+
+def test_auto_disable_window_pruning():
+    r._failure_history["test/route"] = [r.now() - 700]  # outside 600s window
+    r.disabled_routes.discard("test/route")
+    r.status.pop("test/route", None)
+    # One failure — should NOT auto-disable (old failure is pruned)
+    r.mark_fail("test/route", "error")
+    assert "test/route" not in r.disabled_routes
+
+
+def test_auto_disable_preserves_disabled_routes():
+    r.disabled_routes.add("previously/disabled")
+    r._failure_history.pop("test/route", None)
+    r.status.pop("test/route", None)
+    for i in range(r.AUTO_DISABLE_THRESHOLD):
+        r.mark_fail("test/route", f"error {i}")
+    assert "previously/disabled" in r.disabled_routes  # not touched
+
+
+# ── admin auth ──
+
+def test_admin_auth_no_key_set():
+    with patch.object(r, "ADMIN_KEY", ""):
+        req = MagicMock()
+        req.url.path = "/v1/_test_all"
+        r.check_admin_auth(req)  # should not raise
+
+
+def test_admin_auth_valid_key():
+    with patch.object(r, "ADMIN_KEY", "admin-secret"):
+        req = MagicMock()
+        req.url.path = "/v1/_test_all"
+        req.headers = {"authorization": "Bearer admin-secret"}
+        r.check_admin_auth(req)  # should not raise
+
+
+def test_admin_auth_invalid_key():
+    from fastapi import HTTPException
+    with patch.object(r, "ADMIN_KEY", "admin-secret"):
+        req = MagicMock()
+        req.url.path = "/v1/_test_all"
+        req.headers = {"authorization": "Bearer wrong"}
+        with pytest.raises(HTTPException) as exc_info:
+            r.check_admin_auth(req)
+        assert exc_info.value.status_code == 403
+
+
+def test_admin_auth_skips_non_admin():
+    with patch.object(r, "ADMIN_KEY", "admin-secret"):
+        req = MagicMock()
+        req.url.path = "/v1/_status"
+        req.headers = {}
+        r.check_admin_auth(req)  # _status is not in _ADMIN_PATHS, should not raise
+
+
+# ── health cache ──
+
+def test_health_cache_ttl_configurable():
+    assert r.HEALTH_CACHE_TTL >= 0
+    assert isinstance(r.HEALTH_CACHE_TTL, int)
+
+
+def test_auto_disable_threshold_configurable():
+    assert r.AUTO_DISABLE_THRESHOLD >= 1
+    assert r.AUTO_DISABLE_WINDOW >= 1
+
+
+def test_failure_history_pruning():
+    # Old failures outside window should be pruned
+    r._failure_history["test/route"] = [r.now() - 9999]
+    r.disabled_routes.discard("test/route")
+    r.status.pop("test/route", None)
+    r.mark_fail("test/route", "error")
+    # Only 1 failure (the old one was pruned), should NOT auto-disable
+    assert "test/route" not in r.disabled_routes

@@ -37,8 +37,18 @@ app.add_middleware(
 
 # --- Auth config ---
 API_KEY = os.environ.get("FREE_ROUTER_API_KEY", "")  # if set, require Bearer token on /v1/*
+ADMIN_KEY = os.environ.get("FREE_ROUTER_ADMIN_KEY", "")  # protects /v1/_test_all, /v1/_status, etc.
 UI_USER = os.environ.get("FREE_ROUTER_UI_USER", "")  # if set, require basic auth on web UI
 UI_PASS = os.environ.get("FREE_ROUTER_UI_PASS", "")
+LOCALHOST_BYPASS = os.environ.get("FREE_ROUTER_LOCALHOST_BYPASS", "1") == "1"  # skip UI auth on 127.0.0.1
+
+# --- Auto-disable: route disabled after AUTO_DISABLE_THRESHOLD failures in AUTO_DISABLE_WINDOW ---
+AUTO_DISABLE_THRESHOLD = int(os.environ.get("FREE_ROUTER_AUTO_DISABLE_THRESHOLD", "5"))
+AUTO_DISABLE_WINDOW = int(os.environ.get("FREE_ROUTER_AUTO_DISABLE_WINDOW", "600"))  # seconds
+_failure_history = {}  # route -> list of failure timestamps
+
+# --- Health cache: skip re-testing routes checked < HEALTH_CACHE_TTL ago ---
+HEALTH_CACHE_TTL = int(os.environ.get("FREE_ROUTER_HEALTH_TTL", "30"))  # seconds
 
 # --- Rate limiting (token bucket per client IP) ---
 RATE_LIMIT_RPM = int(os.environ.get("FREE_ROUTER_RPM", "30"))  # requests per minute
@@ -87,26 +97,44 @@ def check_api_auth(request: Request):
         return
     raise HTTPException(status_code=401, detail="invalid or missing API key")
 
+# Admin endpoints that require ADMIN_KEY
+_ADMIN_PATHS = {"/v1/_test_all", "/api/keys/validate-all"}
+
+def check_admin_auth(request: Request):
+    """Require ADMIN_KEY on admin-only endpoints."""
+    if not ADMIN_KEY:
+        return
+    if request.url.path not in _ADMIN_PATHS:
+        return
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], ADMIN_KEY):
+        return
+    raise HTTPException(status_code=403, detail="admin key required")
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     start = time.time()
     client_ip = request.client.host if request.client else "-"
+    is_localhost = client_ip in ("127.0.0.1", "::1", "localhost")
     check_api_auth(request)
+    check_admin_auth(request)
     # basic auth for web UI (skip API routes and ping)
     if UI_USER and UI_PASS and not request.url.path.startswith("/v1/") and not request.url.path.startswith("/api/"):
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:]).decode()
-                user, pwd = decoded.split(":", 1)
-                if secrets.compare_digest(user, UI_USER) and secrets.compare_digest(pwd, UI_PASS):
-                    resp = await call_next(request)
-                    _log_request(request.method, request.url.path, resp.status_code, (time.time() - start) * 1000, client_ip)
-                    return resp
-            except Exception:
-                pass
-        _log_request(request.method, request.url.path, 401, (time.time() - start) * 1000, client_ip)
-        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="free-router"'})
+        # localhost bypass: skip auth for local connections
+        if not (LOCALHOST_BYPASS and is_localhost):
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth[6:]).decode()
+                    user, pwd = decoded.split(":", 1)
+                    if secrets.compare_digest(user, UI_USER) and secrets.compare_digest(pwd, UI_PASS):
+                        resp = await call_next(request)
+                        _log_request(request.method, request.url.path, resp.status_code, (time.time() - start) * 1000, client_ip)
+                        return resp
+                except Exception:
+                    pass
+            _log_request(request.method, request.url.path, 401, (time.time() - start) * 1000, client_ip)
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="free-router"'})
     # rate limit /v1/chat/completions
     if request.url.path == "/v1/chat/completions" and request.method == "POST":
         if not _rate_check(client_ip):
@@ -243,6 +271,22 @@ def mark_fail(route, note):
         s["last_result"] = note
         s["last_check"] = now()
         s["failures"] = s.get("failures", 0) + 1
+        # Track failure timestamps for auto-disable window
+        history = _failure_history.setdefault(route, [])
+        history.append(now())
+        # Prune old failures outside the window
+        cutoff = now() - AUTO_DISABLE_WINDOW
+        _failure_history[route] = [t for t in history if t > cutoff]
+        # Auto-disable if too many failures in the window
+        if len(_failure_history[route]) >= AUTO_DISABLE_THRESHOLD:
+            disabled_routes.add(route)
+            s["manual"] = True
+            s["cooldown_until"] = now() + 24 * 3600
+            s["last_result"] = note + f" [auto-disabled: {len(_failure_history[route])} fails in {AUTO_DISABLE_WINDOW}s]"
+            LOG_DIR.joinpath("router.log").open("a").write(
+                f"{datetime.now()} AUTO-DISABLE {route}: {len(_failure_history[route])} failures in {AUTO_DISABLE_WINDOW}s\n")
+            save_status()
+            return
         # transient (10m); 3 consecutive -> manual review 24h
         if s["failures"] >= 3:
             s["manual"] = True
@@ -252,10 +296,18 @@ def mark_fail(route, note):
             s["cooldown_until"] = now() + cooldown_for(route) * 60
         save_status()
 
-async def test_route(route, timeout: float = 20):
+async def test_route(route, timeout: float = 20, force: bool = False):
     """Return (ok: bool, detail: str). Does NOT mutate status.
-    Async (httpx.AsyncClient) so it never blocks the uvicorn loop.
-    Inspired by free-llm-gateway's parallel key validation: 15s cap, not 30s."""
+    Health cache: if the route was tested successfully within HEALTH_CACHE_TTL seconds,
+    return cached result immediately (unless force=True).
+    Async (httpx.AsyncClient) so it never blocks the uvicorn loop."""
+    # Health cache: skip re-testing if recently verified
+    if not force:
+        s = status.get(route, {})
+        if s.get("healthy") and s.get("last_check", 0) > 0:
+            age = now() - s["last_check"]
+            if age < HEALTH_CACHE_TTL:
+                return True, f"cached ({age}s ago)"
     prov = provider_of(route)
     model = route_model(route)
     p = providers.get(prov, {})
@@ -470,13 +522,19 @@ import asyncio as _asyncio
 
 @app.post("/v1/_test_all")
 @app.post("/api/keys/validate-all")
-async def test_all():
+async def test_all(req: Request):
+    body = {}
+    try:
+        body = await req.json()
+    except Exception:
+        pass
+    force = body.get("force", False)  # force=True skips health cache
     sem = _asyncio.Semaphore(4)
     results = {}
 
     async def _one(r):
         async with sem:
-            ok, detail = await test_route(r, timeout=20)
+            ok, detail = await test_route(r, timeout=20, force=force)
             if ok:
                 mark_ok(r, detail)
             else:

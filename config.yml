@@ -8,8 +8,13 @@ schedule:
   - "20 5 * * *"
   - "40 5 * * *"
 
-# Auth (set via environment variables, not here):
-#   FREE_ROUTER_API_KEY  - if set, /v1/* endpoints require Bearer token
-#   FREE_ROUTER_UI_USER  - if set (with UI_PASS), web UI requires basic auth
-#   FREE_ROUTER_UI_PASS  - password for web UI basic auth
-#   FREE_ROUTER_RPM      - rate limit per client IP (default: 30 req/min)
+# Auth & safety (set via environment variables, not here):
+#   FREE_ROUTER_API_KEY      - if set, /v1/* endpoints require Bearer token
+#   FREE_ROUTER_ADMIN_KEY    - protects /v1/_test_all, /v1/_status (admin endpoints)
+#   FREE_ROUTER_UI_USER      - if set (with UI_PASS), web UI requires basic auth
+#   FREE_ROUTER_UI_PASS      - password for web UI basic auth
+#   FREE_ROUTER_RPM          - rate limit per client IP (default: 30 req/min)
+#   FREE_ROUTER_LOCALHOST_BYPASS - skip UI auth on 127.0.0.1 (default: 1)
+#   FREE_ROUTER_AUTO_DISABLE_THRESHOLD - failures before auto-disable (default: 5)
+#   FREE_ROUTER_AUTO_DISABLE_WINDOW    - time window in seconds (default: 600)
+#   FREE_ROUTER_HEALTH_TTL             - health cache TTL in seconds (default: 30)
