@@ -190,11 +190,17 @@ def reload_from_disk():
         save_status()
     return True
 
-def save_status():
+def _save_status_sync():
+    """Synchronous file write — called from a thread to avoid blocking the event loop."""
     with lock:
-        tmp = STATUS_JSON.with_suffix(".tmp")
-        tmp.write_text(json.dumps(status, indent=2, default=str))
-        tmp.replace(STATUS_JSON)
+        snap = json.dumps(status, indent=2, default=str)
+    tmp = STATUS_JSON.with_suffix(".tmp")
+    tmp.write_text(snap)
+    tmp.replace(STATUS_JSON)
+
+def save_status():
+    """Non-blocking: schedule file write on a thread so we never freeze uvicorn."""
+    threading.Thread(target=_save_status_sync, daemon=True).start()
 
 def provider_of(route):
     return route.split("/", 1)[0]
