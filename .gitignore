@@ -7,3 +7,9 @@ port.txt
 bind.txt
 *.tmp
 .pytest_cache/
+
+# local scratch / experiments (not part of the service)
+ultra-router.py
+upload_endpoint.py
+opencode-archive/
+*.log
