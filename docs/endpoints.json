@@ -1,0 +1,28 @@
+{
+  "name": "free-router",
+  "baseUrl": "http://127.0.0.1:8765/v1",
+  "portFile": "C:\\Users\\gokoq\\.free-router\\port.txt",
+  "endpoints": {
+    "openai": {
+      "chatCompletions": "http://127.0.0.1:8765/v1/chat/completions",
+      "models": "http://127.0.0.1:8765/v1/models",
+      "stream": true
+    },
+    "anthropic": {
+      "messages": "http://127.0.0.1:8765/v1/messages",
+      "countTokens": "http://127.0.0.1:8765/v1/messages/count_tokens",
+      "models": "http://127.0.0.1:8765/v1/models"
+    },
+    "health": {
+      "status": "http://127.0.0.1:8765/v1/_status",
+      "health": "http://127.0.0.1:8765/v1/_health",
+      "dashboard": "http://127.0.0.1:8765/v1/_dashboard",
+      "testAll": "http://127.0.0.1:8765/v1/_test_all"
+    },
+    "dashboard": "http://127.0.0.1:8765/"
+  },
+  "models": ["free-fast", "free-reasoning", "free-coder", "free-vision", "free-default"],
+  "auth": "not-needed (or omit Authorization header)",
+  "providersBehind": ["vyceai (gpt-5.6-luna, claude-sonnet-4-6, deepseek-v4-flash)", "inferx (Qwen3.8, Qwen3-Coder-Next, glm-5.3-flash, gemma-4)"],
+  "docs": ["C:\\Users\\gokoq\\.free-router\\docs\\UNIVERSAL_GUIDE.md", "C:\\Users\\gokoq\\Documents\\free-router\\CONNECT.md"]
+}

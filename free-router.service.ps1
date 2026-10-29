@@ -24,7 +24,7 @@ $settings = New-ScheduledTaskSettingsSet `
 $principal = New-ScheduledTaskPrincipal `
     -UserId "$env:USERDOMAIN\$env:USERNAME" `
     -LogonType S4U `
-    -RunLevel HighestAvailable
+    -RunLevel Highest
 
 # remove old if exists
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {

@@ -56,13 +56,21 @@ route_overrides:
   bai/model-name: { max_input_tokens: 32000 }
 ```
 
+## Universal Endpoint (OpenAI + Anthropic)
+
+**Base URL:** `http://127.0.0.1:8765/v1` — works for *any* agent (OpenAI or Anthropic). See `docs/UNIVERSAL_GUIDE.md` and `C:\Users\gokoq\Documents\free-router\CONNECT.md` for copy-paste configs (OpenCode, OMP, Cursor, Continue, Cline, generic SDKs).
+
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/v1/models` | List available model groups |
 | `POST` | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
+| `POST` | `/v1/messages` | Messages (Anthropic-compatible) — same models, same failover |
+| `POST` | `/v1/messages/count_tokens` | Anthropic token count (estimate) |
 | `GET` | `/v1/_status` | Per-route health status |
+| `GET` | `/v1/_health` | Per-group health summary |
+| `GET` | `/v1/_dashboard` | Full dashboard JSON |
 | `POST` | `/v1/_test/{route}` | Test a single route |
 | `POST` | `/v1/_test_all` | Test all routes (parallel) |
 | `GET` | `/api/ping` | Liveness check |

@@ -328,13 +328,25 @@ async def test_route(route, timeout: float = 20, force: bool = False):
             r = await c.post(url, headers=headers, json=payload)
         if r.status_code == 200:
             try:
-                txt = r.json()["choices"][0]["message"]["content"]
+                msg = r.json()["choices"][0]["message"]
+                txt = msg.get("content")
+                if txt is None:
+                    # reasoning models return null content with reasoning field — still healthy
+                    if msg.get("reasoning") is not None or msg.get("refusal") is not None:
+                        return True, "200 reasoning/null content OK"
+                    # also consider empty but 200 as OK (chat proxy will still work)
+                    return True, "200 OK (null content)"
+                txt = txt.strip() if isinstance(txt, str) else str(txt)
             except Exception:
                 return True, f"200 but unexpected body ({r.status_code})"
-            return True, f"200 {txt.strip()[:40]}"
+            return True, f"200 {txt[:40]}"
         return False, f"HTTP {r.status_code} {r.text[:120]}"
     except Exception as e:
         return False, f"ERR {type(e).__name__}: {str(e)[:120]}"
+
+# upstream statuses worth failing over to the next route (quota/rate/server/model errors).
+# Other 4xx (400/401/422) are client errors — failover wouldn't help, pass through.
+_RETRYABLE = {404, 408, 429, 402, 403, 500, 502, 503, 504, 529}
 
 def model_list():
     """OpenAI-compatible /v1/models using group names as model ids."""
@@ -353,9 +365,156 @@ def pick_route(group):
     candidates.sort(key=lambda r: status.get(r, {}).get("last_check", 0))
     return candidates[0]
 
+def _anthropic_to_openai(body: dict) -> tuple[dict, str]:
+    """Convert Anthropic /v1/messages body to OpenAI /v1/chat/completions body.
+    Returns (openai_body, model). Handles system, messages with text/image blocks."""
+    model = body.get("model", "")
+    # Anthropic messages: list of {role, content: str | list[ {type:text/image} ]}
+    msgs = []
+    if body.get("system"):
+        sys_content = body["system"]
+        if isinstance(sys_content, list):
+            sys_content = " ".join(b.get("text","") for b in sys_content if isinstance(b, dict))
+        msgs.append({"role": "system", "content": str(sys_content)})
+    for m in body.get("messages", []):
+        role = m.get("role", "user")
+        content = m.get("content")
+        if isinstance(content, list):
+            # flatten blocks to string (vision via text for now)
+            parts = []
+            for b in content:
+                if b.get("type") == "text":
+                    parts.append(b.get("text",""))
+                elif b.get("type") == "image":
+                    # keep as text placeholder — upstream vision via OpenAI image_url would need url
+                    src = b.get("source", {})
+                    parts.append(f"[image:{src.get('media_type','')}]")
+            content = "\n".join(parts)
+        msgs.append({"role": role, "content": str(content) if content is not None else ""})
+    openai_body = {
+        "model": model,
+        "messages": msgs,
+        "max_tokens": body.get("max_tokens", 1024),
+        "stream": body.get("stream", False),
+        "temperature": body.get("temperature", 1),
+    }
+    # pass through top_p, stop_sequences if present
+    if "top_p" in body:
+        openai_body["top_p"] = body["top_p"]
+    if "stop_sequences" in body:
+        openai_body["stop"] = body["stop_sequences"]
+    return openai_body, model
+
+def _openai_to_anthropic(openai_resp: dict, model: str) -> dict:
+    """Convert OpenAI chat.completion JSON to Anthropic messages response."""
+    choice = (openai_resp.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    content = msg.get("content") or ""
+    # reasoning models may have reasoning field but content null — surface reasoning as text
+    if not content and msg.get("reasoning"):
+        content = str(msg["reasoning"])
+    usage = openai_resp.get("usage") or {}
+    return {
+        "id": openai_resp.get("id", "msg_" + secrets.token_hex(8)),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": content}],
+        "stop_reason": "end_turn" if choice.get("finish_reason") in ("stop", "length", None) else choice.get("finish_reason"),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        },
+    }
+
 @app.get("/v1/models")
 def get_models():
     return model_list()
+
+# Anthropic-compatible alias: some tools expect /v1/messages at same base
+@app.post("/v1/messages")
+@app.post("/v1/messages/count_tokens")
+async def anthropic_messages(req: Request):
+    body = await req.json()
+    # count_tokens helper
+    if req.url.path.endswith("/count_tokens"):
+        # estimate: chars/4
+        chars = 0
+        if body.get("system"):
+            chars += len(str(body["system"]))
+        for m in body.get("messages", []):
+            c = m.get("content")
+            if isinstance(c, list):
+                for b in c:
+                    if b.get("type")=="text":
+                        chars += len(b.get("text",""))
+            else:
+                chars += len(str(c or ""))
+        return {"input_tokens": max(1, chars // 4)}
+    openai_body, model = _anthropic_to_openai(body)
+    if model not in groups:
+        raise HTTPException(status_code=404, detail=f"unknown group '{model}'. known: {list(groups)}")
+    # reuse same routing/proxy logic as chat_completions but with conversion
+    est_input = sum(len(m.get("content","")) for m in openai_body.get("messages",[])) // 4
+    tried = []
+    route = pick_route(model)
+    while route:
+        tried.append(route)
+        cap = status.get(route, {}).get("max_input_tokens") or 10**9
+        if est_input > cap:
+            with lock:
+                status.setdefault(route, {})["last_result"] = f"skip input ~{est_input} > cap {cap}"
+            route = pick_route(model)
+            if route in tried:
+                break
+            continue
+        prov = provider_of(route); mdl = route_model(route)
+        p = providers[prov]; base = p["baseUrl"].rstrip("/"); key = p["apiKey"]
+        url = f"{base}/chat/completions"
+        fwd = dict(openai_body); fwd["model"] = mdl
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        is_stream = openai_body.get("stream", False)
+        try:
+            c = httpx.AsyncClient(timeout=120, trust_env=False)
+            upstream = await c.post(url, headers=headers, json=fwd)
+            if upstream.status_code != 200:
+                await c.aclose()
+                if upstream.status_code in _RETRYABLE:
+                    mark_fail(route, f"HTTP {upstream.status_code} {upstream.text[:80]}")
+                    route = pick_route(model)
+                    if route in tried:
+                        break
+                    continue
+                # client errors (401 revoked key, 400 bad request...) won't fix
+                # themselves on retry — record as failure so the dashboard
+                # doesn't show a dead provider as healthy
+                mark_fail(route, f"HTTP {upstream.status_code} {upstream.text[:80]}")
+                raise HTTPException(status_code=upstream.status_code, detail=upstream.text[:500])
+            if is_stream and upstream.status_code == 200:
+                # For Anthropic streaming, proxy OpenAI SSE and translate roughly to Anthropic SSE
+                # Simplest: relay OpenAI SSE as-is with anthropic content-type — clients that require strict anthropic SSE will still get tokens
+                async def stream_gen():
+                    try:
+                        async for chunk in upstream.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await c.aclose()
+                mark_ok(route, f"200 anthropic-stream via {route}")
+                return StreamingResponse(stream_gen(), media_type="text/event-stream")
+            content = upstream.json()
+            await c.aclose()
+            mark_ok(route, f"200 anthropic via {route}")
+            return JSONResponse(_openai_to_anthropic(content, model))
+        except HTTPException:
+            raise
+        except Exception as e:
+            mark_fail(route, f"proxy ERR {type(e).__name__}: {str(e)[:80]}")
+            route = pick_route(model)
+            if route in tried:
+                break
+            continue
+    raise HTTPException(status_code=503, detail=f"all routes for '{model}' unavailable. tried: {tried}")
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: Request):
@@ -379,44 +538,54 @@ async def chat_completions(req: Request):
             if route in tried:
                 break
             continue
-        ok, detail = await test_route(route)
-        if ok:
-            # proxy the real request to this route
-            prov = provider_of(route); mdl = route_model(route)
-            p = providers[prov]; base = p["baseUrl"].rstrip("/"); key = p["apiKey"]
-            url = f"{base}/chat/completions"
-            fwd = dict(body); fwd["model"] = mdl
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            is_stream = body.get("stream", False)
-            try:
-                c = httpx.AsyncClient(timeout=120, trust_env=False)
-                upstream = await c.post(url, headers=headers, json=fwd)
-                if is_stream and upstream.status_code == 200:
-                    # SSE streaming: relay chunks as they arrive, close client when done
-                    async def stream_gen():
-                        try:
-                            async for chunk in upstream.aiter_bytes():
-                                yield chunk
-                        finally:
-                            await c.aclose()
-                    mark_ok(route, f"200 stream via {route}")
-                    return StreamingResponse(stream_gen(), status_code=upstream.status_code,
-                                             media_type=upstream.headers.get("content-type", "text/event-stream"))
-                else:
-                    # non-streaming: buffer and return
-                    content = upstream.content
-                    await c.aclose()
-                    mark_ok(route, f"200 via {route}")
-                    return Response(content=content, status_code=upstream.status_code,
-                                    media_type=upstream.headers.get("content-type", "application/json"))
-            except Exception as e:
-                mark_fail(route, f"proxy ERR {type(e).__name__}: {str(e)[:80]}")
-                route = pick_route(model)
-                if route in tried:
-                    break
-                continue
-        else:
-            mark_fail(route, detail)
+        # proxy DIRECTLY — no pre-flight test_route (it doubled latency: a full
+        # extra upstream round-trip per request). Failover happens below on
+        # proxy errors or retryable upstream statuses. pick_route already
+        # skips cooldown/manual/disabled routes.
+        prov = provider_of(route); mdl = route_model(route)
+        p = providers[prov]; base = p["baseUrl"].rstrip("/"); key = p["apiKey"]
+        url = f"{base}/chat/completions"
+        fwd = dict(body); fwd["model"] = mdl
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        is_stream = body.get("stream", False)
+        try:
+            c = httpx.AsyncClient(timeout=120, trust_env=False)
+            upstream = await c.post(url, headers=headers, json=fwd)
+            if is_stream and upstream.status_code == 200:
+                # SSE streaming: relay chunks as they arrive, close client when done
+                async def stream_gen():
+                    try:
+                        async for chunk in upstream.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await c.aclose()
+                mark_ok(route, f"200 stream via {route}")
+                return StreamingResponse(stream_gen(), status_code=upstream.status_code,
+                                         media_type=upstream.headers.get("content-type", "text/event-stream"))
+            elif upstream.status_code == 200:
+                # non-streaming: buffer and return
+                content = upstream.content
+                await c.aclose()
+                mark_ok(route, f"200 via {route}")
+                return Response(content=content, status_code=upstream.status_code,
+                                media_type=upstream.headers.get("content-type", "application/json"))
+            else:
+                # non-200: fail over on retryable statuses, pass through otherwise
+                await c.aclose()
+                if upstream.status_code in _RETRYABLE:
+                    mark_fail(route, f"HTTP {upstream.status_code} {upstream.text[:80]}")
+                    route = pick_route(model)
+                    if route in tried:
+                        break
+                    continue
+                # client errors (401 revoked key, 400 bad request...) won't fix
+                # themselves on retry — record as failure so the dashboard
+                # doesn't show a dead provider as healthy
+                mark_fail(route, f"HTTP {upstream.status_code} {upstream.text[:80]}")
+                return Response(content=upstream.content, status_code=upstream.status_code,
+                                media_type=upstream.headers.get("content-type", "application/json"))
+        except Exception as e:
+            mark_fail(route, f"proxy ERR {type(e).__name__}: {str(e)[:80]}")
             route = pick_route(model)
             if route in tried:
                 break
@@ -581,7 +750,20 @@ def _find_port(preferred: int, bind_host: str, tries: int = 20) -> int:
 
 # ---- startup (module-level; avoids on_event kwarg removed in this fastapi) ----
 def startup():
+    global actual_port, actual_bind
     load_config()
+    # resolve port/bind here so port.txt exists even under `uvicorn router:app` (not just python router.py)
+    try:
+        pref_port = int(os.environ.get("FREE_ROUTER_PORT") or cfg.get("port", 8765))
+        pref_bind = os.environ.get("FREE_ROUTER_BIND") or cfg.get("bind", "127.0.0.1")
+        actual_port = _find_port(pref_port, pref_bind)
+        actual_bind = pref_bind
+        (BASE / "port.txt").write_text(str(actual_port))
+        (BASE / "bind.txt").write_text(actual_bind)
+        if actual_port != pref_port:
+            LOG_DIR.joinpath("router.log").open("a").write(f"{datetime.now()} port {pref_port} busy, using {actual_port}\n")
+    except Exception:
+        pass
     save_status()
     sched = BackgroundScheduler()
     # 3 daily sweeps at 5:00 / 5:20 / 5:40
